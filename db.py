@@ -1,0 +1,257 @@
+"""
+db.py
+─────
+SQLite-backed persistence layer for HazariTracker Facio.
+
+Tables
+──────
+  employees  — enrolled users + their face descriptor + face samples (JSON-serialized lists)
+  attendance — every attendance event (check-in / check-out / already)
+  settings   — key-value store for app settings (e.g. server_url, sso_token)
+"""
+
+import sqlite3
+import os
+import contextlib
+import json
+from datetime import datetime, date
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "hazari_facio.db")
+
+
+@contextlib.contextmanager
+def _connect():
+    con = sqlite3.connect(DB_PATH, timeout=30.0)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def init_db():
+    """Create tables if they don't exist yet."""
+    with _connect() as con:
+        con.executescript("""
+            CREATE TABLE IF NOT EXISTS employees (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                emp_id          TEXT    NOT NULL UNIQUE,
+                name            TEXT    NOT NULL,
+                department      TEXT    DEFAULT '',
+                face_descriptor TEXT,  -- JSON list of floats (128-D)
+                face_samples    TEXT,  -- JSON list of lists of floats (up to 5 samples)
+                enrolled_at     TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS attendance (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                emp_id      TEXT    NOT NULL,
+                emp_name    TEXT    NOT NULL,
+                event_type  TEXT    NOT NULL DEFAULT 'check_in',
+                timestamp   TEXT    NOT NULL,
+                date        TEXT    NOT NULL,
+                score       INTEGER DEFAULT 0,  -- Match confidence / similarity percentage
+                FOREIGN KEY (emp_id) REFERENCES employees(emp_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+        """)
+
+
+# ── Settings operations ───────────────────────────────────────────────────────
+
+def get_setting(key: str) -> str | None:
+    with _connect() as con:
+        row = con.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+
+def set_setting(key: str, value: str):
+    with _connect() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+
+
+def delete_setting(key: str):
+    with _connect() as con:
+        con.execute("DELETE FROM settings WHERE key = ?", (key,))
+
+
+# ── Employee operations ───────────────────────────────────────────────────────
+
+def add_employee(emp_id: str, name: str, department: str, 
+                 face_descriptor: str | None = None, face_samples: str | None = None) -> bool:
+    """Insert a new employee. Returns False if emp_id already exists."""
+    clean_id = str(emp_id or "").strip().upper()
+    clean_name = str(name or "").strip()
+    clean_dept = str(department or "").strip()
+    try:
+        with _connect() as con:
+            enrolled = datetime.now().isoformat(timespec="seconds") if face_descriptor else None
+            con.execute(
+                """INSERT INTO employees (emp_id, name, department, face_descriptor, face_samples, enrolled_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (clean_id, clean_name, clean_dept, face_descriptor, face_samples, enrolled),
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def update_employee_details(emp_id: str, name: str, department: str):
+    """Update employee name and department details."""
+    clean_id = str(emp_id or "").strip().upper()
+    clean_name = str(name or "").strip()
+    clean_dept = str(department or "").strip()
+    with _connect() as con:
+        con.execute(
+            "UPDATE employees SET name = ?, department = ? WHERE emp_id = ?",
+            (clean_name, clean_dept, clean_id),
+        )
+
+
+def update_face_template(emp_id: str, face_descriptor: str, face_samples: str):
+    """Overwrite the stored face templates for an existing employee."""
+    clean_id = str(emp_id or "").strip().upper()
+    now_str = datetime.now().isoformat(timespec="seconds")
+    with _connect() as con:
+        con.execute(
+            "UPDATE employees SET face_descriptor = ?, face_samples = ?, enrolled_at = ? WHERE emp_id = ?",
+            (face_descriptor, face_samples, now_str, clean_id),
+        )
+
+
+def delete_employee(emp_id: str):
+    clean_id = str(emp_id or "").strip().upper()
+    with _connect() as con:
+        con.execute("DELETE FROM employees WHERE emp_id = ?", (clean_id,))
+
+
+def get_employee(emp_id: str) -> sqlite3.Row | None:
+    clean_id = str(emp_id or "").strip().upper()
+    with _connect() as con:
+        return con.execute(
+            "SELECT * FROM employees WHERE emp_id = ?", (clean_id,)
+        ).fetchone()
+
+
+def get_all_employees() -> list[sqlite3.Row]:
+    with _connect() as con:
+        return con.execute(
+            """SELECT id, emp_id, name, department, enrolled_at, 
+                      (face_descriptor IS NOT NULL) as is_enrolled 
+               FROM employees ORDER BY name"""
+        ).fetchall()
+
+
+def get_all_templates() -> list[dict]:
+    """Return list of dicts with (emp_id, name, face_descriptor, face_samples) for every enrolled employee."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT emp_id, name, face_descriptor, face_samples FROM employees WHERE face_descriptor IS NOT NULL"
+        ).fetchall()
+    
+    templates = []
+    for r in rows:
+        try:
+            desc = json.loads(r["face_descriptor"]) if r["face_descriptor"] else None
+            samples = json.loads(r["face_samples"]) if r["face_samples"] else None
+            if desc:
+                templates.append({
+                    "emp_id": r["emp_id"],
+                    "name": r["name"],
+                    "face_descriptor": desc,
+                    "face_samples": samples or [desc]  # fallback to descriptor if no samples
+                })
+        except Exception as e:
+            print(f"[DB] Error loading template for {r['emp_id']}: {e}")
+    return templates
+
+
+# ── Attendance operations ─────────────────────────────────────────────────────
+
+def already_checked_in_today(emp_id: str) -> bool:
+    """True if there's a check_in record for this employee today with no checkout."""
+    today = date.today().isoformat()
+    with _connect() as con:
+        row = con.execute(
+            """SELECT COUNT(*) as cnt FROM attendance
+               WHERE emp_id = ? AND date = ? AND event_type = 'check_in'""",
+            (emp_id, today),
+        ).fetchone()
+    return row["cnt"] > 0
+
+
+def already_checked_out_today(emp_id: str) -> bool:
+    today = date.today().isoformat()
+    with _connect() as con:
+        row = con.execute(
+            """SELECT COUNT(*) as cnt FROM attendance
+               WHERE emp_id = ? AND date = ? AND event_type = 'check_out'""",
+            (emp_id, today),
+        ).fetchone()
+    return row["cnt"] > 0
+
+
+def log_attendance(emp_id: str, emp_name: str, event_type: str = "check_in", score: int = 0):
+    now = datetime.now()
+    with _connect() as con:
+        con.execute(
+            """INSERT INTO attendance (emp_id, emp_name, event_type, timestamp, date, score)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (emp_id, emp_name, event_type,
+             now.isoformat(timespec="seconds"),
+             now.date().isoformat(), score),
+        )
+
+
+def get_attendance(
+    date_filter: str | None = None,
+    emp_id_filter: str | None = None,
+    limit: int = 500,
+) -> list[sqlite3.Row]:
+    query  = "SELECT * FROM attendance WHERE 1=1"
+    params: list = []
+    if date_filter:
+        query  += " AND date = ?"
+        params.append(date_filter)
+    if emp_id_filter:
+        query  += " AND emp_id = ?"
+        params.append(emp_id_filter.strip().upper())
+    query += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+    with _connect() as con:
+        return con.execute(query, params).fetchall()
+
+
+def get_attendance_summary(target_date: str | None = None) -> list[sqlite3.Row]:
+    """
+    Returns one row per employee showing their first check-in and last check-out
+    for the given date (defaults to today).
+    """
+    target_date = target_date or date.today().isoformat()
+    with _connect() as con:
+        return con.execute(
+            """
+            SELECT
+                emp_id,
+                emp_name,
+                MIN(CASE WHEN event_type='check_in'  THEN timestamp END) AS check_in,
+                MAX(CASE WHEN event_type='check_out' THEN timestamp END) AS check_out
+            FROM attendance
+            WHERE date = ?
+            GROUP BY emp_id
+            ORDER BY emp_name
+            """,
+            (target_date,),
+        ).fetchall()
