@@ -169,15 +169,12 @@ class ScannerPage(tk.Frame):
         # Update server connection visual indicator
         self._update_connection_status()
 
-        # Start Camera capture device
-        self._camera = cv2.VideoCapture(0)
-        if not self._camera.isOpened():
-            self._video_lbl.config(text="⚠️ Camera Not Found\n\nPlease connect a webcam and retry.", font=FONT_H2, fg=DANGER)
-            self._running = False
-            return
+        # Show initial starting status
+        self._video_lbl.config(image="", text="⚡ Starting camera stream...", font=FONT_H2, fg=TEXT_SECONDARY)
 
-        self._camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self._camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self._status_val.set("Connecting webcam...")
+        self._status_lbl.config(fg=TEXT_SECONDARY)
+        self._name_var.set("Scanning...")
 
         # Launch thread loops
         self._camera_thread = threading.Thread(target=self._camera_loop, daemon=True)
@@ -186,27 +183,26 @@ class ScannerPage(tk.Frame):
         self._rec_thread = threading.Thread(target=self._recognition_loop, daemon=True)
         self._rec_thread.start()
 
-        self._status_val.set("Waiting for face...")
-        self._status_lbl.config(fg=TEXT_SECONDARY)
-        self._name_var.set("Scanning...")
-
         # Start UI render loop
         self.after(50, self._ui_render_loop)
 
     def stop(self):
         """Stops the loops and releases the camera device."""
+        print("[Scanner] Stopping scanner and releasing camera...")
         self._running = False
         
+        with self._lock:
+            if self._camera:
+                self._camera.release()
+                self._camera = None
+        print("[Scanner] Camera released.")
+
         # Give threads time to exit
         if self._camera_thread:
             self._camera_thread.join(timeout=1.0)
         if self._rec_thread:
             self._rec_thread.join(timeout=1.0)
-
-        with self._lock:
-            if self._camera:
-                self._camera.release()
-                self._camera = None
+        print("[Scanner] Threads stopped.")
 
         self._video_lbl.config(image="", text="Camera stopped")
         self._status_val.set("Camera Off")
@@ -247,11 +243,40 @@ class ScannerPage(tk.Frame):
 
     def _camera_loop(self):
         """Constantly captures raw webcam frames."""
+        try:
+            cam_idx_str = db.get_setting("camera_index")
+            cam_idx = int(cam_idx_str) if cam_idx_str is not None else 0
+        except Exception:
+            cam_idx = 0
+
+        # Initialize VideoCapture in the background thread
+        cam = cv2.VideoCapture(cam_idx)
+        if not cam.isOpened():
+            # Update UI on main thread if webcam fails to load
+            self.after(0, lambda: self._video_lbl.config(
+                text="⚠️ Camera Not Found\n\nPlease connect a webcam and retry.", 
+                font=FONT_H2, fg=DANGER
+            ))
+            self.after(0, lambda: self._status_val.set("Webcam Error"))
+            self._running = False
+            return
+
+        cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        with self._lock:
+            self._camera = cam
+
+        self.after(0, lambda: self._status_val.set("Waiting for face..."))
+
         while self._running:
+            cam_ref = None
             with self._lock:
-                if not self._camera:
-                    break
-                ret, frame = self._camera.read()
+                cam_ref = self._camera
+            if not cam_ref:
+                break
+
+            ret, frame = cam_ref.read()
 
             if not ret:
                 time.sleep(0.01)

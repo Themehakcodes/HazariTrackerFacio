@@ -168,7 +168,7 @@ class HazariTrackerApp(tk.Tk):
 
     def _show(self, key: str):
         # 1. Stop scanning thread if leaving scanner page
-        if hasattr(self, "_scanner_page") and self._scanner_page:
+        if hasattr(self, "_scanner_page") and self._scanner_page and self._scanner_page._running:
             self._scanner_page.stop()
 
         for page in self._pages.values():
@@ -206,10 +206,6 @@ class HazariTrackerApp(tk.Tk):
 
         # Start employee template synchronization and schedule periodic sync
         self._run_periodic_sync()
-
-        # Start scanner
-        self._update_badge(True)
-        self._scanner_page.start()
 
     def _run_periodic_sync(self):
         if not sso_client.is_authenticated():

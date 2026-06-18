@@ -371,6 +371,8 @@ class FaceCaptureDialog(tk.Toplevel):
         self.photos_base64 = []
         self.is_running = True
         self.camera = None
+        self.auto_scan_active = False
+        self.last_capture_time = 0
 
         self._build_ui()
         self._start_camera()
@@ -387,8 +389,8 @@ class FaceCaptureDialog(tk.Toplevel):
         self.step_label.pack(anchor="w", pady=(PAD_XS, 0))
 
         # Camera view label
-        self.video_container = tk.Frame(self, bg="black", bd=1, relief="solid")
-        self.video_container.pack(pady=PAD_MD, width=640, height=400)
+        self.video_container = tk.Frame(self, bg="black", bd=1, relief="solid", width=640, height=400)
+        self.video_container.pack(pady=PAD_MD)
         self.video_container.pack_propagate(False)
 
         self.video_lbl = tk.Label(self.video_container, bg="black", text="Starting camera...")
@@ -401,18 +403,26 @@ class FaceCaptureDialog(tk.Toplevel):
         self.status_lbl = tk.Label(ctrl, text="Position your face inside the screen...", font=FONT_BODY, bg=BG_BASE, fg=TEXT_SECONDARY)
         self.status_lbl.pack(side="left")
 
-        self.btn_capture = tk.Button(ctrl, text="📸  Capture Photo (1/3)", font=FONT_H3, bg=ACCENT, fg=TEXT_PRIMARY,
+        self.btn_capture = tk.Button(ctrl, text="📸  Start Auto Scan", font=FONT_H3, bg=ACCENT, fg=TEXT_PRIMARY,
                                      activebackground=ACCENT_HOVER, activeforeground=TEXT_PRIMARY,
-                                     relief="flat", bd=0, padx=PAD_LG, pady=8, cursor="hand2", command=self._capture_pose)
+                                     relief="flat", bd=0, padx=PAD_LG, pady=8, cursor="hand2", command=self._start_auto_scan)
         self.btn_capture.pack(side="right")
 
     def _start_camera(self):
-        # Try to open default camera (index 0)
-        self.camera = cv2.VideoCapture(0)
+        print("[Enroll] Initialising camera capture...")
+        try:
+            cam_idx_str = db.get_setting("camera_index")
+            cam_idx = int(cam_idx_str) if cam_idx_str is not None else 0
+        except Exception:
+            cam_idx = 0
+        print(f"[Enroll] Requesting camera index: {cam_idx}")
+        self.camera = cv2.VideoCapture(cam_idx)
         if not self.camera.isOpened():
+            print(f"[Enroll] Error: Could not open camera at index {cam_idx}")
             self.video_lbl.config(text="⚠️ Failed to open webcam.\nPlease check connection.")
             self.btn_capture.config(state="disabled")
             return
+        print(f"[Enroll] Camera index {cam_idx} opened successfully.")
 
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -420,7 +430,29 @@ class FaceCaptureDialog(tk.Toplevel):
         # Start capture update thread loop
         threading.Thread(target=self._camera_loop, daemon=True).start()
 
+    def _play_beep(self):
+        try:
+            import winsound
+            winsound.Beep(2000, 150)
+        except Exception:
+            pass
+
+    def _start_auto_scan(self):
+        self.auto_scan_active = True
+        self.step = 0
+        self.encodings = []
+        self.photos_base64 = []
+        self.last_capture_time = 0
+        self.btn_capture.config(state="disabled", text="⚡ Auto-Scanning...")
+        self.step_label.config(text="Pose 1: Look directly into the camera.")
+
     def _camera_loop(self):
+        poses_instr = [
+            "Pose 1: Look directly into the camera.",
+            "Pose 2: Tilt your head slightly to the left/right.",
+            "Pose 3: Move closer / tilt head up or down."
+        ]
+        
         while self.is_running and self.camera:
             ret, frame = self.camera.read()
             if not ret:
@@ -435,7 +467,6 @@ class FaceCaptureDialog(tk.Toplevel):
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
             # Detect face locally for live bounding box
-            # To keep UI smooth, we can run face locations on a smaller version of the image
             small_rgb = cv2.resize(rgb, (0, 0), fx=0.5, fy=0.5)
             locations = face_recognition.face_locations(small_rgb, model="hog")
 
@@ -444,10 +475,48 @@ class FaceCaptureDialog(tk.Toplevel):
                 top, right, bottom, left = locations[0]
                 # Scale back up
                 top, right, bottom, left = top * 2, right * 2, bottom * 2, left * 2
+                
+                # Check if we should capture this frame
+                now = time.time()
+                if self.auto_scan_active and (now - self.last_capture_time > 2.0):
+                    # We have a face, let's encode it
+                    full_loc = [(top, right, bottom, left)]
+                    encs = face_recognition.face_encodings(rgb, full_loc, num_jitters=3)
+                    if encs:
+                        self.encodings.append(encs[0].tolist())
+                        
+                        # Save photo
+                        _, buffer = cv2.imencode('.jpg', frame)
+                        b64_str = base64.b64encode(buffer).decode('utf-8')
+                        self.photos_base64.append(f"data:image/jpeg;base64,{b64_str}")
+                        
+                        self.last_capture_time = now
+                        self.step += 1
+                        
+                        # Play beep sound
+                        self._play_beep()
+                        
+                        # Update UI
+                        if self.step >= 3:
+                            self.auto_scan_active = False
+                            self._update_status_thread(f"Pose {self.step}/3 captured! Finalising...", SUCCESS)
+                            self.after(0, self._finalize_registration)
+                        else:
+                            next_instr = poses_instr[self.step]
+                            self._update_status_thread(f"Pose {self.step}/3 captured! Prepare for next pose.", SUCCESS)
+                            self.after(0, lambda s=self.step, instr=next_instr: self.step_label.config(text=f"Pose {s+1}: {instr}"))
+                
+                if self.auto_scan_active:
+                    self._update_status_thread(f"Auto-scanning: Keep position (Pose {self.step+1}/3)...", SUCCESS)
+                else:
+                    self._update_status_thread("Face detected. Ready to scan.", SUCCESS)
+                
                 cv2.rectangle(rgb, (left, top), (right, bottom), (255, 107, 0), 2)
-                self._update_status_thread("Face detected. Click capture!", SUCCESS)
             else:
-                self._update_status_thread("Adjust position until face is detected...", TEXT_SECONDARY)
+                if self.auto_scan_active:
+                    self._update_status_thread(f"Awaiting face detection for Pose {self.step+1}/3...", WARNING)
+                else:
+                    self._update_status_thread("Adjust position until face is detected...", TEXT_SECONDARY)
 
             # Render in label
             img = Image.fromarray(rgb)
@@ -462,66 +531,6 @@ class FaceCaptureDialog(tk.Toplevel):
     def _update_status_thread(self, text, color):
         if self.is_running:
             self.after(0, lambda: self.status_lbl.config(text=text, fg=color))
-
-    def _capture_pose(self):
-        if not hasattr(self, "current_frame") or self.current_frame is None:
-            return
-
-        frame = self.current_frame.copy()
-        
-        # Disable capture button temporarily
-        self.btn_capture.config(state="disabled", text="⏳ Processing...")
-        
-        def process_capture():
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            locations = face_recognition.face_locations(rgb, model="hog")
-            
-            if not locations:
-                messagebox.showerror("No Face Detected", "Could not detect any face in the photo.\nPlease ensure you are well-lit and facing the camera directly.")
-                self.after(0, lambda: self.btn_capture.config(state="normal", text=f"📸  Capture Photo ({self.step+1}/3)"))
-                return
-
-            if len(locations) > 1:
-                messagebox.showerror("Multiple Faces", "Multiple faces detected. Please make sure only one person is in front of the camera.")
-                self.after(0, lambda: self.btn_capture.config(state="normal", text=f"📸  Capture Photo ({self.step+1}/3)"))
-                return
-
-            # Generate encoding
-            encs = face_recognition.face_encodings(rgb, locations, num_jitters=3)
-            if not encs:
-                messagebox.showerror("Encoding Failed", "Failed to extract biometric face features. Please try again.")
-                self.after(0, lambda: self.btn_capture.config(state="normal", text=f"📸  Capture Photo ({self.step+1}/3)"))
-                return
-
-            # Save encoding
-            self.encodings.append(encs[0].tolist())
-            
-            # Save Base64 jpeg string of the photo
-            _, buffer = cv2.imencode('.jpg', frame)
-            b64_str = base64.b64encode(buffer).decode('utf-8')
-            data_url = f"data:image/jpeg;base64,{b64_str}"
-            self.photos_base64.append(data_url)
-
-            # Advance steps
-            self.step += 1
-            
-            if self.step < 3:
-                # Setup next pose instructions
-                poses = [
-                    "Pose 1: Look directly into the camera.",
-                    "Pose 2: Tilt your head slightly to the left/right.",
-                    "Pose 3: Move closer / tilt head up or down."
-                ]
-                
-                def setup_next_step():
-                    self.step_label.config(text=poses[self.step])
-                    self.btn_capture.config(state="normal", text=f"📸  Capture Photo ({self.step+1}/3)")
-                self.after(0, setup_next_step)
-            else:
-                # Complete the scan!
-                self.after(0, self._finalize_registration)
-
-        threading.Thread(target=process_capture, daemon=True).start()
 
     def _finalize_registration(self):
         self.is_running = False

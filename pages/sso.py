@@ -7,6 +7,7 @@ SSO Cloud Sync Configuration Page and Login Overlay.
 import tkinter as tk
 from tkinter import ttk, messagebox
 import sso_client
+import db
 from theme import *
 
 class SSOPage(tk.Frame):
@@ -52,6 +53,24 @@ class SSOPage(tk.Frame):
         )
         tk.Label(left_col, text=desc_text, font=FONT_SMALL, bg=BG_SURFACE, fg=TEXT_SECONDARY, justify="left", anchor="w").pack(fill="x", pady=PAD_MD)
 
+        # Divider line
+        ttk.Separator(left_col, orient="horizontal").pack(fill="x", pady=PAD_MD)
+
+        # Camera settings
+        tk.Label(left_col, text="Default Camera Source:", font=FONT_H3, bg=BG_SURFACE, fg=TEXT_PRIMARY).pack(anchor="w", pady=(0, PAD_SM))
+
+        self._cam_combobox = ttk.Combobox(left_col, state="readonly", values=[
+            "Camera 0 (Primary / Integrated)",
+            "Camera 1 (Secondary / External)",
+            "Camera 2",
+            "Camera 3",
+            "Camera 4"
+        ])
+        self._cam_combobox.pack(fill="x", pady=(0, PAD_MD))
+
+        self._btn_save_cam = tk.Button(left_col, text="Save Camera Setting", font=FONT_BODY, bg=BG_ELEVATED, fg=TEXT_PRIMARY, relief="flat", bd=0, padx=PAD_MD, pady=6, cursor="hand2", command=self._save_camera)
+        self._btn_save_cam.pack(anchor="w")
+
         # Right Column: Auth Status & SSO
         self._right_col = tk.LabelFrame(main_content, text=" Authentication Status ", font=FONT_H2, bg=BG_SURFACE, fg=ACCENT, bd=1, relief="solid", padx=PAD_MD, pady=PAD_MD)
         self._right_col.place(relx=0.52, rely=0.0, relwidth=0.48, relheight=1.0)
@@ -66,6 +85,17 @@ class SSOPage(tk.Frame):
         url = sso_client.get_server_url()
         self._url_entry.delete(0, tk.END)
         self._url_entry.insert(0, url)
+
+        # Populate Camera Choice
+        try:
+            cam_idx_str = db.get_setting("camera_index")
+            cam_idx = int(cam_idx_str) if cam_idx_str is not None else 0
+            if 0 <= cam_idx < 5:
+                self._cam_combobox.current(cam_idx)
+            else:
+                self._cam_combobox.current(0)
+        except Exception:
+            pass
 
         # Clear state frame
         for child in self._state_frame.winfo_children():
@@ -120,6 +150,13 @@ class SSOPage(tk.Frame):
         sso_client.set_server_url(url)
         messagebox.showinfo("Success", "Portal server URL updated successfully.")
         self.refresh()
+
+    def _save_camera(self):
+        idx = self._cam_combobox.current()
+        if idx < 0:
+            idx = 0
+        db.set_setting("camera_index", str(idx))
+        messagebox.showinfo("Success", f"Default camera source set to Camera {idx} successfully.")
 
     def _logout(self):
         if messagebox.askyesno("Confirm Disconnect", "Are you sure you want to disconnect from the cloud server?"):
