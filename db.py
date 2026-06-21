@@ -255,3 +255,10 @@ def get_attendance_summary(target_date: str | None = None) -> list[sqlite3.Row]:
             """,
             (target_date,),
         ).fetchall()
+
+
+def clear_all_data():
+    """Wipes all local employee and attendance records (e.g. on SSO logout/disconnect)."""
+    with _connect() as con:
+        con.execute("DELETE FROM attendance")
+        con.execute("DELETE FROM employees")

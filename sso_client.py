@@ -161,9 +161,10 @@ def is_authenticated():
 
 
 def sign_out():
-    """Removes stored tokens and user details from the database."""
+    """Removes stored tokens and user details from the database, and clears cached data."""
     db.delete_setting("sso_token")
     db.delete_setting("sso_user")
+    db.clear_all_data()
 
 
 def start_sso_flow(on_success, on_error):
