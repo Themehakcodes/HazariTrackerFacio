@@ -71,6 +71,11 @@ class ScannerPage(tk.Frame):
         self._templates = []
         self._last_punch_time = {}
         
+        # Verification timer states
+        self._verifying_emp_id = None
+        self._verifying_start_time = 0.0
+        self._verifying_last_seen = 0.0
+        
         # Frame exchanges
         self._current_frame = None       # Latest raw frame
         self._display_frame = None       # BGR frame processed for display (boxes drawn)
@@ -331,16 +336,56 @@ class ScannerPage(tk.Frame):
                     match_emp = self._find_match(enc)
                     
                     if match_emp:
+                        emp_id = match_emp["emp_id"]
+                        name = match_emp["name"]
+
+                        # Check if this person is already under punch cooldown
+                        last_punch = self._last_punch_time.get(emp_id, 0.0)
+                        if now - last_punch < PUNCH_COOLDOWN_SECONDS:
+                            # Skip recognition timer if under cooldown, but still show normal green box
+                            detections.append({
+                                "location": orig_loc,
+                                "name": name,
+                                "emp_id": emp_id,
+                                "confidence": match_emp["confidence"],
+                                "status": "recognized"
+                            })
+                            continue
+
+                        # If this matches our currently verifying employee
+                        if self._verifying_emp_id == emp_id:
+                            self._verifying_last_seen = now
+                            duration = now - self._verifying_start_time
+                            remaining = max(0.0, 3.0 - duration)
+                            
+                            if duration >= 3.0:
+                                # Reset verification tracking so it doesn't trigger again immediately
+                                self._verifying_emp_id = None
+                                self._verifying_start_time = 0.0
+                                self._verifying_last_seen = 0.0
+                                
+                                # Trigger the punch!
+                                self._handle_matched_punch(match_emp, frame)
+                            else:
+                                # Update UI with verification progress
+                                self.after(0, lambda n=name, r=remaining: self._update_verifying_status(n, r))
+                        else:
+                            # Start verification for this new employee
+                            self._verifying_emp_id = emp_id
+                            self._verifying_start_time = now
+                            self._verifying_last_seen = now
+                            self.after(0, lambda n=name: self._update_verifying_status(n, 3.0))
+
+                        duration = now - self._verifying_start_time
+                        remaining_seconds = max(0, int(3.99 - duration))
+
                         detections.append({
                             "location": orig_loc,
-                            "name": match_emp["name"],
-                            "emp_id": match_emp["emp_id"],
+                            "name": f"{name} (Hold {remaining_seconds}s)",
+                            "emp_id": emp_id,
                             "confidence": match_emp["confidence"],
                             "status": "recognized"
                         })
-                        
-                        # Trigger punch flow
-                        self._handle_matched_punch(match_emp, frame)
                     else:
                         detections.append({
                             "location": orig_loc,
@@ -349,6 +394,15 @@ class ScannerPage(tk.Frame):
                             "confidence": 0,
                             "status": "unknown"
                         })
+
+            # Check if the verifying employee has vanished
+            if self._verifying_emp_id:
+                emp_in_frame = any(d.get("emp_id") == self._verifying_emp_id for d in detections)
+                if not emp_in_frame and (now - self._verifying_last_seen > 1.0):
+                    self._verifying_emp_id = None
+                    self._verifying_start_time = 0.0
+                    self._verifying_last_seen = 0.0
+                    self.after(0, self._clear_verifying_status)
 
             with self._detections_lock:
                 self._detections = detections
@@ -497,6 +551,24 @@ class ScannerPage(tk.Frame):
             self._status_lbl.config(fg=TEXT_SECONDARY)
             self._name_var.set("Scanning...")
             self._badge_var.set("")
+
+    def _update_verifying_status(self, name, remaining):
+        if not self._running:
+            return
+        if "✓" in self._badge_var.get() or "ALREADY" in self._badge_var.get():
+            return
+        self._status_val.set(f"Verifying face... {remaining:.1f}s")
+        self._status_lbl.config(fg=ACCENT)
+        self._name_var.set(name)
+
+    def _clear_verifying_status(self):
+        if not self._running:
+            return
+        if "✓" in self._badge_var.get() or "ALREADY" in self._badge_var.get():
+            return
+        self._status_val.set("Waiting for face...")
+        self._status_lbl.config(fg=TEXT_SECONDARY)
+        self._name_var.set("Scanning...")
 
     # ── UI Render Loop ────────────────────────────────────────────────────────
 
