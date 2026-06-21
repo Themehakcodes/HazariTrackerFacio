@@ -8,6 +8,8 @@
 import os, sys
 from version import VERSION, APP_NAME
 
+from PyInstaller.utils.hooks import collect_data_files
+
 block_cipher = None
 
 a = Analysis(
@@ -19,7 +21,7 @@ a = Analysis(
         ("version.py", "."),
         ("icon.png", "."),
         ("icon.ico", "."),
-    ],
+    ] + collect_data_files("face_recognition_models"),
     hiddenimports=[
         "face_recognition",
         "cv2",
