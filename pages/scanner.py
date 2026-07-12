@@ -276,6 +276,7 @@ class ScannerPage(tk.Frame):
 
         self.after(0, lambda: self._status_val.set("Waiting for face..."))
 
+        fail_count = 0
         while self._running:
             cam_ref = None
             with self._lock:
@@ -286,9 +287,22 @@ class ScannerPage(tk.Frame):
             ret, frame = cam_ref.read()
 
             if not ret:
-                time.sleep(0.01)
+                fail_count += 1
+                if fail_count > 50:  # ~1.5 seconds of consecutive read failures
+                    print(f"[Scanner] Camera {cam_idx} read failed. Attempting reconnect...")
+                    with self._lock:
+                        if self._camera:
+                            self._camera.release()
+                        self._camera = cv2.VideoCapture(cam_idx)
+                        self._camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                        self._camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    fail_count = 0
+                    time.sleep(1)
+                else:
+                    time.sleep(0.03)
                 continue
 
+            fail_count = 0
             frame = cv2.flip(frame, 1)  # mirror image
             
             with self._lock:
@@ -615,6 +629,18 @@ class ScannerPage(tk.Frame):
                 
                 cv2.rectangle(frame, (left, bottom - text_size[1] - 8), (left + text_size[0] + 10, bottom), color, -1)
                 cv2.putText(frame, lbl_text, (left + 5, bottom - 4), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+            # Responsive resize to fit label
+            lbl_w = self._video_lbl.winfo_width()
+            lbl_h = self._video_lbl.winfo_height()
+            
+            if lbl_w > 10 and lbl_h > 10:
+                frame_h, frame_w = frame.shape[:2]
+                ratio = min(lbl_w / frame_w, lbl_h / frame_h)
+                new_w = int(frame_w * ratio)
+                new_h = int(frame_h * ratio)
+                if new_w > 0 and new_h > 0:
+                    frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
             # Convert to PIL Image for Tkinter rendering
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
