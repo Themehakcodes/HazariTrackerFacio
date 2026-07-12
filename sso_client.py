@@ -305,7 +305,8 @@ def send_punch_to_server(employee_id, location="Face Recognition Terminal", punc
         err_msg = e.read().decode("utf-8")
         try:
             res_err = json.loads(err_msg)
-            return False, res_err.get("message", f"Server error: {e.code}")
+            error_text = res_err.get("message") or res_err.get("error_description") or f"Server error: {e.code}"
+            return False, error_text
         except Exception:
             return False, f"Server returned error code {e.code}"
     except Exception as e:

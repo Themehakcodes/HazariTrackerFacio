@@ -138,13 +138,13 @@ class ScannerPage(tk.Frame):
         tree_frame = tk.Frame(tree_border, bg=BG_SURFACE)
         tree_frame.pack(fill="both", expand=True)
 
-        cols = ("time", "name", "id", "cloud")
+        cols = ("name", "id", "in_time", "out_time")
         self._tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
         for col, w, label in [
-            ("time",  65,  "Time"),
-            ("name",  140, "Name"),
-            ("id",    70,  "ID"),
-            ("cloud", 55,  "Sync"),
+            ("name",      130, "Name"),
+            ("id",        60,  "ID"),
+            ("in_time",   70,  "In Time"),
+            ("out_time",  70,  "Out Time"),
         ]:
             self._tree.heading(col, text=label)
             self._tree.column(col, width=w, anchor="w")
@@ -227,15 +227,17 @@ class ScannerPage(tk.Frame):
             self._tree.delete(row)
 
         today_str = date.today().isoformat()
-        records = db.get_attendance(date_filter=today_str, limit=10)
+        records = db.get_attendance_summary(target_date=today_str)
         for r in records:
-            ts = r["timestamp"] or ""
-            time_str = ts[11:19] if len(ts) >= 19 else ts
+            in_time = r["check_in"] or "--:--"
+            out_time = r["check_out"] or "--:--"
+            if len(in_time) >= 19: in_time = in_time[11:19]
+            if len(out_time) >= 19: out_time = out_time[11:19]
             self._tree.insert("", "end", values=(
-                time_str,
                 r["emp_name"],
                 r["emp_id"],
-                "✅" if r["event_type"] in ("check_in", "check_out") else "⚠️"
+                in_time,
+                out_time
             ))
 
     def _update_connection_status(self):
